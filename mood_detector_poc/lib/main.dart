@@ -2,6 +2,8 @@ import 'dart:ui';
 
 import 'package:flutter/material.dart';
 
+import 'services/mood_prediction_service.dart';
+
 void main() {
   runApp(const MyApp());
 }
@@ -43,27 +45,37 @@ class MoodDetectorHome extends StatefulWidget {
 }
 
 class _MoodDetectorHomeState extends State<MoodDetectorHome> {
+  final TextEditingController _textController = TextEditingController(
+    text: 'I feel overwhelmed and cannot sleep.',
+  );
+  late final MoodPredictionService _predictionService;
+
   String _currentMood = 'Serene';
   double _moodScore = 0.82;
   String _moodDescription =
       'Your facial cues and tone suggest you are relaxed and present. Keep embracing the calm moments.';
+  double? _rawScore;
+  double? _scaledScore;
+  String? _lastAnalyzedInput;
+  bool _isLoading = false;
+  String? _errorMessage;
 
-  final List<_MoodSnapshot> _recentEntries = const [
-    _MoodSnapshot(
+  final List<_MoodSnapshot> _recentEntries = [
+    const _MoodSnapshot(
       label: 'Inspired',
       score: 0.91,
       timeAgo: '10 min ago',
       color: Color(0xFFA1F0D1),
       icon: Icons.auto_awesome,
     ),
-    _MoodSnapshot(
+    const _MoodSnapshot(
       label: 'Curious',
       score: 0.76,
       timeAgo: '2 hrs ago',
       color: Color(0xFFB7C0FF),
       icon: Icons.lightbulb_outline,
     ),
-    _MoodSnapshot(
+    const _MoodSnapshot(
       label: 'Reflective',
       score: 0.64,
       timeAgo: 'Yesterday',
@@ -72,32 +84,190 @@ class _MoodDetectorHomeState extends State<MoodDetectorHome> {
     ),
   ];
 
-  final List<String> _recommendedActions = const [
+  List<String> _recommendedActions = [
     'Capture a gratitude voice note',
     'Take a mindful breathing break',
     'Share a positive update with your team',
   ];
 
-  void _simulateMoodScan() {
+  @override
+  void initState() {
+    super.initState();
+    _predictionService = MoodPredictionService();
+  }
+
+  @override
+  void dispose() {
+    _textController.dispose();
+    _predictionService.dispose();
+    super.dispose();
+  }
+
+  Future<void> _analyzeMood() async {
+    final text = _textController.text.trim();
+    if (text.isEmpty) {
+      setState(() {
+        _errorMessage = 'Please describe how you are feeling before analyzing.';
+      });
+      return;
+    }
+
     setState(() {
-      final moods = [
-        ('Joyful', 0.94,
-            'You radiate excitement. Channel that energy toward your next big idea!'),
-        ('Grounded', 0.78,
-            'A balanced mood detected. Keep leaning on routines that anchor you.'),
-        ('Reflective', 0.65,
-            'You seem thoughtful. Consider journaling to capture what is on your mind.'),
-        ('Empowered', 0.88,
-            'Confidence shines through. Use it to spark meaningful connections today.'),
-      ];
-
-      moods.shuffle();
-      final mood = moods.first;
-
-      _currentMood = mood.$1;
-      _moodScore = mood.$2;
-      _moodDescription = mood.$3;
+      _isLoading = true;
+      _errorMessage = null;
     });
+
+    try {
+      final prediction = await _predictionService.predictMood(text);
+      if (!mounted) {
+        return;
+      }
+      final insights = _interpretScore(prediction.rawScore);
+      setState(() {
+        _currentMood = insights.label;
+        _moodScore = insights.progress;
+        _moodDescription = insights.description;
+        _recommendedActions = List<String>.from(insights.recommendations);
+        _rawScore = prediction.rawScore;
+        _scaledScore = prediction.scaledScore;
+        _lastAnalyzedInput = prediction.input;
+        _recentEntries.insert(
+          0,
+          _MoodSnapshot(
+            label: insights.label,
+            score: insights.progress,
+            timeAgo: 'Just now',
+            color: insights.color,
+            icon: insights.icon,
+          ),
+        );
+        if (_recentEntries.length > 6) {
+          _recentEntries.removeRange(6, _recentEntries.length);
+        }
+      });
+    } on MoodPredictionException catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _errorMessage = error.message;
+      });
+    } catch (_) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _errorMessage =
+            'Unable to analyze your mood right now. Please try again shortly.';
+      });
+    } finally {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _isLoading = false;
+      });
+    }
+  }
+
+  _MoodInsights _interpretScore(double rawScore) {
+    final normalized = rawScore.clamp(1, 10).toDouble();
+    final progress = (1 - ((normalized - 1) / 9)).clamp(0.0, 1.0).toDouble();
+
+    if (normalized <= 3.0) {
+      return _MoodInsights(
+        label: 'Joyful',
+        description:
+            'Your language signals steadiness and calm. Keep reinforcing the routines that help you feel balanced.',
+        recommendations: const [
+          'Share a quick gratitude note with a friend',
+          'Schedule a short walk to maintain your rhythm',
+          'Capture how you are feeling in a journal entry',
+        ],
+        progress: progress,
+        color:  Color(0xFFFFFFFF),
+        icon: Icons.auto_awesome,
+      );
+    }
+
+    if (normalized <= 4.5) {
+      return _MoodInsights(
+        label: 'At ease',
+        description:
+            'It seems like you feel peaceful and satisfied with what you have, without constantly seeking more.',
+        recommendations: const [
+          'Keep nurturing gratitude every day',
+          'Stay curious and open to growth',
+          'Protect your peace by setting healthy boundaries',
+        ],
+        progress: progress,
+        color: const Color(0xFFFFFFFF),
+        icon: Icons.lightbulb_outline,
+      );
+    }
+
+    if (normalized <= 6.5) {
+      return _MoodInsights(
+        label: 'Tense',
+        description:
+            'The text suggests you are feeling stretched. Consider lighter commitments and compassionate self-talk today.',
+        recommendations: const [
+          'Prioritize rest and hydration breaks',
+          'List one practical step that could reduce stress',
+          'Message a colleague or friend for support',
+        ],
+        progress: progress,
+        color: const Color(0xFFFFFFFFF),
+        icon: Icons.self_improvement,
+      );
+    }
+
+
+    if (normalized <= 7.5) {
+      return _MoodInsights(
+        label: 'Drained',
+        description:
+        'A drained person feels mentally and physically exhausted, with little motivation or energy left to handle daily tasks.',
+        recommendations: const [
+          'Rest without guilt — your body and mind need it',
+          'Simplify your schedule and say no when needed',
+          'Reconnect with small joys that recharge you',
+        ],
+        progress: progress,
+        color: const Color(0xFFFFFFFFF),
+        icon: Icons.self_improvement,
+      );
+    }
+
+    if (normalized <= 8.5) {
+      return _MoodInsights(
+        label: 'At Risk',
+        description:
+            'Your tone indicates elevated distress. Please check in with a trusted contact and consider professional resources.',
+        recommendations: const [
+          'Reach out to a support hotline or counselor',
+          'Let someone nearby know how you are feeling',
+          'Focus on slow breathing while you seek help',
+        ],
+        progress: progress,
+        color: const Color(0xFFFF0000),
+        icon: Icons.warning_rounded,
+      );
+    }
+
+    return _MoodInsights(
+      label: 'Crisis',
+      description:
+          'The message signals severe emotional distress. Please contact emergency services or a crisis hotline immediately.',
+      recommendations: const [
+        'Call your local emergency number or crisis hotline',
+        'Stay with someone you trust until you feel safe',
+        'Remove access to anything that could harm you',
+      ],
+      progress: progress,
+      color: const Color(0xFFFFFFFF),
+      icon: Icons.report_gmailerrorred,
+    );
   }
 
   @override
@@ -151,7 +321,54 @@ class _MoodDetectorHomeState extends State<MoodDetectorHome> {
                     color: Colors.white,
                   ),
                 ),
-                const SizedBox(height: 32),
+                const SizedBox(height: 24),
+                Text(
+                  'Describe how you are feeling',
+                  style: theme.textTheme.titleMedium?.copyWith(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: _textController,
+                  minLines: 2,
+                  maxLines: 5,
+                  style: const TextStyle(color: Colors.white),
+                  decoration: InputDecoration(
+                    hintText: 'Share a sentence about your current mood...',
+                    hintStyle: const TextStyle(color: Colors.white54),
+                    filled: true,
+                    fillColor: Colors.white.withOpacity(0.08),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(18),
+                      borderSide: BorderSide.none,
+                    ),
+                    focusedBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(18),
+                      borderSide: BorderSide(
+                        color: theme.colorScheme.secondary.withOpacity(0.6),
+                        width: 1.4,
+                      ),
+                    ),
+                    contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 18,
+                      vertical: 16,
+                    ),
+                  ),
+                  textInputAction: TextInputAction.done,
+                ),
+                if (_errorMessage != null) ...[
+                  const SizedBox(height: 8),
+                  Text(
+                    _errorMessage!,
+                    style: const TextStyle(
+                      color: Color(0xFFFFB4AB),
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+                const SizedBox(height: 24),
                 _buildMoodCard(context),
                 const SizedBox(height: 28),
                 _buildActionsCard(context),
@@ -160,7 +377,7 @@ class _MoodDetectorHomeState extends State<MoodDetectorHome> {
                   'Recent vibes',
                   style: theme.textTheme.titleLarge?.copyWith(
                     fontWeight: FontWeight.w600,
-                    color: Colors.white,
+                    color: Colors.green,
                   ),
                 ),
                 const SizedBox(height: 12),
@@ -176,7 +393,7 @@ class _MoodDetectorHomeState extends State<MoodDetectorHome> {
           child: SizedBox(
             width: double.infinity,
             child: ElevatedButton.icon(
-              onPressed: _simulateMoodScan,
+              onPressed: _isLoading ? null : _analyzeMood,
               style: ElevatedButton.styleFrom(
                 padding: const EdgeInsets.symmetric(vertical: 18),
                 backgroundColor: theme.colorScheme.secondaryContainer,
@@ -185,10 +402,19 @@ class _MoodDetectorHomeState extends State<MoodDetectorHome> {
                   borderRadius: BorderRadius.circular(20),
                 ),
               ),
-              icon: const Icon(Icons.mic_rounded),
-              label: const Text(
-                'Start Mood Scan',
-                style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+              icon: _isLoading
+                  ? SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2.4,
+                        color: theme.colorScheme.onSecondaryContainer,
+                      ),
+                    )
+                  : const Icon(Icons.analytics_outlined),
+              label: Text(
+                _isLoading ? 'Analyzing…' : 'Analyze Mood',
+                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
               ),
             ),
           ),
@@ -218,7 +444,7 @@ class _MoodDetectorHomeState extends State<MoodDetectorHome> {
                 Text(
                   'Current Mood',
                   style: theme.textTheme.titleMedium?.copyWith(
-                    color: theme.colorScheme.onPrimary.withOpacity(0.9),
+                    color: theme.colorScheme.primary.withOpacity(0.9),
                   ),
                 ),
               ],
@@ -227,14 +453,14 @@ class _MoodDetectorHomeState extends State<MoodDetectorHome> {
             Text(
               _currentMood,
               style: theme.textTheme.displayLarge?.copyWith(
-                color: theme.colorScheme.onPrimary,
+                color: theme.colorScheme.primary,
               ),
             ),
             const SizedBox(height: 12),
             Text(
-              '${(_moodScore * 100).round()}% confidence',
+              'Stability index: ${(_moodScore * 100).round()}%',
               style: theme.textTheme.bodyLarge?.copyWith(
-                color: theme.colorScheme.onPrimary.withOpacity(0.8),
+                color: theme.colorScheme.primary.withOpacity(0.8),
                 letterSpacing: 0.4,
               ),
             ),
@@ -246,6 +472,44 @@ class _MoodDetectorHomeState extends State<MoodDetectorHome> {
                 height: 1.4,
               ),
             ),
+            const SizedBox(height: 18),
+            Wrap(
+              spacing: 12,
+              runSpacing: 12,
+              children: [
+                _ScoreMetricChip(
+                  label: 'Raw score',
+                  value:
+                      _rawScore != null ? _rawScore!.toStringAsFixed(2) : '–',
+                  helper: '1 = calm · 10 = crisis',
+                ),
+                _ScoreMetricChip(
+                  label: 'Scaled score',
+                  value: _scaledScore != null
+                      ? _scaledScore!.toStringAsFixed(0)
+                      : '–',
+                  helper: '0 – 100 scale',
+                ),
+              ],
+            ),
+            if (_lastAnalyzedInput != null) ...[
+              const SizedBox(height: 18),
+              Text(
+                'Last analyzed text',
+                style: theme.textTheme.titleSmall?.copyWith(
+                  color: theme.colorScheme.onPrimary.withOpacity(0.7),
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                _lastAnalyzedInput!,
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onPrimary.withOpacity(0.7),
+                  height: 1.4,
+                ),
+              ),
+            ],
           ],
         ),
       ),
@@ -450,6 +714,78 @@ class _MoodChip extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
     );
   }
+}
+
+class _ScoreMetricChip extends StatelessWidget {
+  const _ScoreMetricChip({
+    required this.label,
+    required this.value,
+    required this.helper,
+  });
+
+  final String label;
+  final String value;
+  final String helper;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(18),
+        color: Colors.white.withOpacity(0.08),
+        border: Border.all(color: Colors.white.withOpacity(0.12)),
+      ),
+      width: 160,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            label,
+            style: theme.textTheme.labelMedium?.copyWith(
+              color: Colors.white70,
+              letterSpacing: 0.3,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            value,
+            style: theme.textTheme.titleLarge?.copyWith(
+              color: Colors.white,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            helper,
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: Colors.white54,
+              height: 1.3,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _MoodInsights {
+  const _MoodInsights({
+    required this.label,
+    required this.description,
+    required this.recommendations,
+    required this.progress,
+    required this.color,
+    required this.icon,
+  });
+
+  final String label;
+  final String description;
+  final List<String> recommendations;
+  final double progress;
+  final Color color;
+  final IconData icon;
 }
 
 class _MoodSnapshot {
